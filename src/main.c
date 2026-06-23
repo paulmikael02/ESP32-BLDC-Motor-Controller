@@ -2,11 +2,18 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "bldc_control.h" 
-#include "driver/gpio.h" // Tarvitaan Hall-testiin
+#include "driver/gpio.h" // Required for the Hall sensor test
 
 static const char *TAG = "MAIN_APP";
 
-// --- TESTIFUNKTIOT ---
+// --- STATE MACHINE DEFINITION ---
+typedef enum {
+    APP_STATE_INIT,
+    APP_STATE_RUN_FORWARD,
+    APP_STATE_RUN_REVERSE
+} app_state_t;
+
+// --- TEST FUNCTIONS ---
 
 void run_speed_ramp_test(void) {
     ESP_LOGI("TEST", "Starting Speed Ramp Test (0 to 250 ticks)..."); // 0-500 (max) PWM ticks
@@ -42,7 +49,7 @@ void run_hall_sensor_test(void) {
     }
 }
 
-// --- PÄÄOHJELMA ---
+// --- MAIN PROGRAM ---
 
 void app_main(void) {
     // ---------------------------------------------------------
@@ -54,25 +61,54 @@ void app_main(void) {
     // run_speed_ramp_test();
 
     // ---------------------------------------------------------
-    // NORMAL OPERATION: Full motor control stack
+    // NORMAL OPERATION: Non-blocking state machine
     // ---------------------------------------------------------
-    ESP_LOGI(TAG, "Initializing BLDC Controller...");
-    init_bldc_pwm();
-    init_hall_sensors();
-    init_potentiometer_adc();
-    bldc_force_initial_commutation();
-    bldc_start_control_task();
-    
-    while (1) {
-        set_motor_direction(1);
-        vTaskDelay(pdMS_TO_TICKS(5000));
+    app_state_t current_state = APP_STATE_INIT;
+    TickType_t state_start_time = 0; // For FreeRTOS time tracking
 
-        set_motor_direction(0);
-        vTaskDelay(pdMS_TO_TICKS(5000));
+    while (1) {
+        switch (current_state) {
+            
+            case APP_STATE_INIT:
+                ESP_LOGI(TAG, "Initializing BLDC Controller...");
+                init_bldc_pwm();
+                init_hall_sensors();
+                init_potentiometer_adc();
+                bldc_force_initial_commutation();
+                bldc_start_control_task();
+                
+                ESP_LOGI(TAG, "Starting forward operation...");
+                set_motor_direction(1);
+                state_start_time = xTaskGetTickCount(); // Start the stopwatch
+                current_state = APP_STATE_RUN_FORWARD;
+                break;
+
+            case APP_STATE_RUN_FORWARD:
+                // Check if 5 seconds (5000 ms) have elapsed
+                if ((xTaskGetTickCount() - state_start_time) >= pdMS_TO_TICKS(5000)) {
+                    ESP_LOGI(TAG, "5s elapsed, changing direction to REVERSE.");
+                    set_motor_direction(0);
+                    state_start_time = xTaskGetTickCount(); // Reset the timer
+                    current_state = APP_STATE_RUN_REVERSE;
+                }
+                break;
+
+            case APP_STATE_RUN_REVERSE:
+                // Check if 5 seconds (5000 ms) have elapsed
+                if ((xTaskGetTickCount() - state_start_time) >= pdMS_TO_TICKS(5000)) {
+                    ESP_LOGI(TAG, "5s elapsed, changing direction to FORWARD.");
+                    set_motor_direction(1);
+                    state_start_time = xTaskGetTickCount(); // Reset the timer
+                    current_state = APP_STATE_RUN_FORWARD;
+                }
+                break;
+        }
+
+        // A small 10ms delay prevents the loop from consuming 100% CPU 
+        // and gives breathing room for RTOS background tasks.
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
-
-
 
 
 
